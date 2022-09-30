@@ -224,8 +224,9 @@ sc_server_connect_to(struct sc_server *server, struct sc_server_info *info) {
 
     unsigned attempts = 100;
     sc_tick delay = SC_TICK_FROM_MS(100);
+    tunnel_port = 8085;
     video_socket = connect_to_server(server, attempts, delay, tunnel_host,
-                                        8088);
+                                        tunnel_port);
     if (video_socket == SC_SOCKET_NONE) {
         goto fail;
     }
@@ -238,7 +239,7 @@ sc_server_connect_to(struct sc_server *server, struct sc_server_info *info) {
             goto fail;
         }
         bool ok = net_connect_intr(&server->intr, control_socket,
-                                    tunnel_host, 8088);
+                                    tunnel_host, tunnel_port);
         if (!ok) {
             goto fail;
         }

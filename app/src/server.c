@@ -383,6 +383,7 @@ sc_server_init(struct sc_server *server, const struct sc_server_params *params,
 static bool
 device_read_info(struct sc_intr *intr, sc_socket device_socket,
                  struct sc_server_info *info) {
+    LOGD("device_read_info enter");
     unsigned char buf[SC_DEVICE_NAME_FIELD_LENGTH + 4];
     ssize_t r = net_recv_all_intr(intr, device_socket, buf, sizeof(buf));
     if (r < SC_DEVICE_NAME_FIELD_LENGTH + 4) {
@@ -397,71 +398,59 @@ device_read_info(struct sc_intr *intr, sc_socket device_socket,
                            | buf[SC_DEVICE_NAME_FIELD_LENGTH + 1];
     info->frame_size.height = (buf[SC_DEVICE_NAME_FIELD_LENGTH + 2] << 8)
                             | buf[SC_DEVICE_NAME_FIELD_LENGTH + 3];
+    if (info->frame_size.width == 0) {
+        info->frame_size.width = 1;
+    }
+    if (info->frame_size.height == 0) {
+        info->frame_size.height = 1;
+    }
+    LOGD("device_read_info exit");
     return true;
 }
 
 static bool
 sc_server_connect_to(struct sc_server *server, struct sc_server_info *info) {
+    LOGD("sc_server_connect_to enter");
     struct sc_adb_tunnel *tunnel = &server->tunnel;
-
-    assert(tunnel->enabled);
-
-    const char *serial = server->serial;
-    assert(serial);
 
     bool control = server->params.control;
 
     sc_socket video_socket = SC_SOCKET_NONE;
     sc_socket control_socket = SC_SOCKET_NONE;
-    if (!tunnel->forward) {
-        video_socket = net_accept_intr(&server->intr, tunnel->server_socket);
-        if (video_socket == SC_SOCKET_NONE) {
+    uint32_t tunnel_host = server->params.tunnel_host;
+    if (!tunnel_host) {
+        tunnel_host = IPV4_LOCALHOST;
+    }
+
+    uint16_t tunnel_port = server->params.tunnel_port;
+    if (!tunnel_port) {
+        tunnel_port = tunnel->local_port;
+    }
+
+    unsigned attempts = 100;
+    sc_tick delay = SC_TICK_FROM_MS(100);
+    video_socket = connect_to_server(server, attempts, delay, tunnel_host,
+                                        8088);
+    if (video_socket == SC_SOCKET_NONE) {
+        goto fail;
+    }
+
+    if (control) {
+        // we know that the device is listening, we don't need several
+        // attempts
+        control_socket = net_socket();
+        if (control_socket == SC_SOCKET_NONE) {
             goto fail;
         }
-
-        if (control) {
-            control_socket =
-                net_accept_intr(&server->intr, tunnel->server_socket);
-            if (control_socket == SC_SOCKET_NONE) {
-                goto fail;
-            }
-        }
-    } else {
-        uint32_t tunnel_host = server->params.tunnel_host;
-        if (!tunnel_host) {
-            tunnel_host = IPV4_LOCALHOST;
-        }
-
-        uint16_t tunnel_port = server->params.tunnel_port;
-        if (!tunnel_port) {
-            tunnel_port = tunnel->local_port;
-        }
-
-        unsigned attempts = 100;
-        sc_tick delay = SC_TICK_FROM_MS(100);
-        video_socket = connect_to_server(server, attempts, delay, tunnel_host,
-                                         tunnel_port);
-        if (video_socket == SC_SOCKET_NONE) {
+        bool ok = net_connect_intr(&server->intr, control_socket,
+                                    tunnel_host, 8088);
+        if (!ok) {
             goto fail;
-        }
-
-        if (control) {
-            // we know that the device is listening, we don't need several
-            // attempts
-            control_socket = net_socket();
-            if (control_socket == SC_SOCKET_NONE) {
-                goto fail;
-            }
-            bool ok = net_connect_intr(&server->intr, control_socket,
-                                       tunnel_host, tunnel_port);
-            if (!ok) {
-                goto fail;
-            }
         }
     }
 
     // we don't need the adb tunnel anymore
-    sc_adb_tunnel_close(tunnel, &server->intr, serial);
+    // sc_adb_tunnel_close(tunnel, &server->intr, serial);
 
     // The sockets will be closed on stop if device_read_info() fails
     bool ok = device_read_info(&server->intr, video_socket, info);
@@ -488,11 +477,6 @@ fail:
         if (!net_close(control_socket)) {
             LOGW("Could not close control socket");
         }
-    }
-
-    if (tunnel->enabled) {
-        // Always leave this function with tunnel disabled
-        sc_adb_tunnel_close(tunnel, &server->intr, serial);
     }
 
     return false;
@@ -679,119 +663,11 @@ run_server(void *data) {
     // Execute "adb start-server" before "adb devices" so that daemon starting
     // output/errors is correctly printed in the console ("adb devices" output
     // is parsed, so it is not output)
-    bool ok = sc_adb_start_server(&server->intr, 0);
-    if (!ok) {
-        LOGE("Could not start adb daemon");
-        goto error_connection_failed;
-    }
-
-    // params->tcpip_dst implies params->tcpip
-    assert(!params->tcpip_dst || params->tcpip);
-
-    // If tcpip_dst parameter is given, then it must connect to this address.
-    // Therefore, the device is unknown, so serial is meaningless at this point.
-    assert(!params->req_serial || !params->tcpip_dst);
-
-    // A device must be selected via a serial in all cases except when --tcpip=
-    // is called with a parameter (in that case, the device may initially not
-    // exist, and scrcpy will execute "adb connect").
-    bool need_initial_serial = !params->tcpip_dst;
-
-    if (need_initial_serial) {
-        // At most one of the 3 following parameters may be set
-        assert(!!params->req_serial
-               + params->select_usb
-               + params->select_tcpip <= 1);
-
-        struct sc_adb_device_selector selector;
-        if (params->req_serial) {
-            selector.type = SC_ADB_DEVICE_SELECT_SERIAL;
-            selector.serial = params->req_serial;
-        } else if (params->select_usb) {
-            selector.type = SC_ADB_DEVICE_SELECT_USB;
-        } else if (params->select_tcpip) {
-            selector.type = SC_ADB_DEVICE_SELECT_TCPIP;
-        } else {
-            // No explicit selection, check $ANDROID_SERIAL
-            const char *env_serial = getenv("ANDROID_SERIAL");
-            if (env_serial) {
-                LOGI("Using ANDROID_SERIAL: %s", env_serial);
-                selector.type = SC_ADB_DEVICE_SELECT_SERIAL;
-                selector.serial = env_serial;
-            } else {
-                selector.type = SC_ADB_DEVICE_SELECT_ALL;
-            }
-        }
-        struct sc_adb_device device;
-        ok = sc_adb_select_device(&server->intr, &selector, 0, &device);
-        if (!ok) {
-            goto error_connection_failed;
-        }
-
-        if (params->tcpip) {
-            assert(!params->tcpip_dst);
-            ok = sc_server_configure_tcpip_unknown_address(server,
-                                                           device.serial);
-            sc_adb_device_destroy(&device);
-            if (!ok) {
-                goto error_connection_failed;
-            }
-            assert(server->serial);
-        } else {
-            // "move" the device.serial without copy
-            server->serial = device.serial;
-            // the serial must not be freed by the destructor
-            device.serial = NULL;
-            sc_adb_device_destroy(&device);
-        }
-    } else {
-        ok = sc_server_configure_tcpip_known_address(server, params->tcpip_dst);
-        if (!ok) {
-            goto error_connection_failed;
-        }
-    }
-
-    const char *serial = server->serial;
-    assert(serial);
-    LOGD("Device serial: %s", serial);
-
-    ok = push_server(&server->intr, serial);
-    if (!ok) {
-        goto error_connection_failed;
-    }
-
-    ok = sc_adb_tunnel_open(&server->tunnel, &server->intr, serial,
-                            params->port_range, params->force_adb_forward);
-    if (!ok) {
-        goto error_connection_failed;
-    }
-
-    // server will connect to our server socket
-    sc_pid pid = execute_server(server, params);
-    if (pid == SC_PROCESS_NONE) {
-        sc_adb_tunnel_close(&server->tunnel, &server->intr, serial);
-        goto error_connection_failed;
-    }
-
-    static const struct sc_process_listener listener = {
-        .on_terminated = sc_server_on_terminated,
-    };
-    struct sc_process_observer observer;
-    ok = sc_process_observer_init(&observer, pid, &listener, server);
-    if (!ok) {
-        sc_process_terminate(pid);
-        sc_process_wait(pid, true); // ignore exit code
-        sc_adb_tunnel_close(&server->tunnel, &server->intr, serial);
-        goto error_connection_failed;
-    }
-
-    ok = sc_server_connect_to(server, &server->info);
+   
+    bool ok = sc_server_connect_to(server, &server->info);
     // The tunnel is always closed by server_connect_to()
     if (!ok) {
-        sc_process_terminate(pid);
-        sc_process_wait(pid, true); // ignore exit code
-        sc_process_observer_join(&observer);
-        sc_process_observer_destroy(&observer);
+        LOGE("sc_server_connect_to error");
         goto error_connection_failed;
     }
 
@@ -806,7 +682,6 @@ run_server(void *data) {
     sc_mutex_unlock(&server->mutex);
 
     // Interrupt sockets to wake up socket blocking calls on the server
-    assert(server->video_socket != SC_SOCKET_NONE);
     net_interrupt(server->video_socket);
 
     if (server->control_socket != SC_SOCKET_NONE) {
@@ -817,24 +692,6 @@ run_server(void *data) {
     // Give some delay for the server to terminate properly
 #define WATCHDOG_DELAY SC_TICK_FROM_SEC(1)
     sc_tick deadline = sc_tick_now() + WATCHDOG_DELAY;
-    bool terminated = sc_process_observer_timedwait(&observer, deadline);
-
-    // After this delay, kill the server if it's not dead already.
-    // On some devices, closing the sockets is not sufficient to wake up the
-    // blocking calls while the device is asleep.
-    if (!terminated) {
-        // The process may have terminated since the check, but it is not
-        // reaped (closed) yet, so its PID is still valid, and it is ok to call
-        // sc_process_terminate() even in that case.
-        LOGW("Killing the server...");
-        sc_process_terminate(pid);
-    }
-
-    sc_process_observer_join(&observer);
-    sc_process_observer_destroy(&observer);
-
-    sc_process_close(pid);
-
     return 0;
 
 error_connection_failed:

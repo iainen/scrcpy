@@ -217,7 +217,7 @@ run_demuxer(void *data) {
         av_packet_unref(packet);
         if (!ok) {
             // cannot process packet (error already logged)
-            break;
+            continue;
         }
     }
 

@@ -267,6 +267,7 @@ sc_server_on_disconnected(struct sc_server *server, void *userdata) {
 
 enum scrcpy_exit_code
 scrcpy(struct scrcpy_options *options) {
+    LOGD("scrcpy enter");
     static struct scrcpy scrcpy;
     struct scrcpy *s = &scrcpy;
 
@@ -341,7 +342,7 @@ scrcpy(struct scrcpy_options *options) {
     }
 
     server_started = true;
-
+    LOGD("scrcpy server_started");
     if (options->display) {
         sdl_set_hints(options->render_driver);
     }
@@ -354,18 +355,6 @@ scrcpy(struct scrcpy_options *options) {
 
     sdl_configure(options->display, options->disable_screensaver);
 
-    // Await for server without blocking Ctrl+C handling
-    bool connected;
-    if (!await_for_server(&connected)) {
-        goto end;
-    }
-
-    if (!connected) {
-        // This is not an error, user requested to quit
-        ret = SCRCPY_EXIT_SUCCESS;
-        goto end;
-    }
-
     // It is necessarily initialized here, since the device is connected
     struct sc_server_info *info = &s->server.info;
 
@@ -373,15 +362,6 @@ scrcpy(struct scrcpy_options *options) {
     assert(serial);
 
     struct sc_file_pusher *fp = NULL;
-
-    if (options->display && options->control) {
-        if (!sc_file_pusher_init(&s->file_pusher, serial,
-                                 options->push_target)) {
-            goto end;
-        }
-        fp = &s->file_pusher;
-        file_pusher_initialized = true;
-    }
 
     struct sc_decoder *dec = NULL;
     bool needs_decoder = options->display;
@@ -436,42 +416,42 @@ scrcpy(struct scrcpy_options *options) {
                 goto end;
             }
 
-            ok = sc_usb_init(&s->usb);
-            if (!ok) {
-                LOGE("Failed to initialize USB");
-                sc_acksync_destroy(&s->acksync);
-                goto aoa_hid_end;
-            }
+            // ok = sc_usb_init(&s->usb);
+            // if (!ok) {
+            //     LOGE("Failed to initialize USB");
+            //     sc_acksync_destroy(&s->acksync);
+            //     goto aoa_hid_end;
+            // }
 
-            assert(serial);
-            struct sc_usb_device usb_device;
-            ok = sc_usb_select_device(&s->usb, serial, &usb_device);
-            if (!ok) {
-                sc_usb_destroy(&s->usb);
-                goto aoa_hid_end;
-            }
+            // assert(serial);
+            // struct sc_usb_device usb_device;
+            // ok = sc_usb_select_device(&s->usb, serial, &usb_device);
+            // if (!ok) {
+            //     sc_usb_destroy(&s->usb);
+            //     goto aoa_hid_end;
+            // }
 
-            LOGI("USB device: %s (%04" PRIx16 ":%04" PRIx16 ") %s %s",
-                 usb_device.serial, usb_device.vid, usb_device.pid,
-                 usb_device.manufacturer, usb_device.product);
+            // LOGI("USB device: %s (%04" PRIx16 ":%04" PRIx16 ") %s %s",
+            //      usb_device.serial, usb_device.vid, usb_device.pid,
+            //      usb_device.manufacturer, usb_device.product);
 
-            ok = sc_usb_connect(&s->usb, usb_device.device, NULL, NULL);
-            sc_usb_device_destroy(&usb_device);
-            if (!ok) {
-                LOGE("Failed to connect to USB device %s", serial);
-                sc_usb_destroy(&s->usb);
-                sc_acksync_destroy(&s->acksync);
-                goto aoa_hid_end;
-            }
+            // ok = sc_usb_connect(&s->usb, usb_device.device, NULL, NULL);
+            // sc_usb_device_destroy(&usb_device);
+            // if (!ok) {
+            //     LOGE("Failed to connect to USB device %s", serial);
+            //     sc_usb_destroy(&s->usb);
+            //     sc_acksync_destroy(&s->acksync);
+            //     goto aoa_hid_end;
+            // }
 
-            ok = sc_aoa_init(&s->aoa, &s->usb, &s->acksync);
-            if (!ok) {
-                LOGE("Failed to enable HID over AOA");
-                sc_usb_disconnect(&s->usb);
-                sc_usb_destroy(&s->usb);
-                sc_acksync_destroy(&s->acksync);
-                goto aoa_hid_end;
-            }
+            // ok = sc_aoa_init(&s->aoa, &s->usb, &s->acksync);
+            // if (!ok) {
+            //     LOGE("Failed to enable HID over AOA");
+            //     sc_usb_disconnect(&s->usb);
+            //     sc_usb_destroy(&s->usb);
+            //     sc_acksync_destroy(&s->acksync);
+            //     goto aoa_hid_end;
+            // }
 
             if (use_hid_keyboard) {
                 if (sc_hid_keyboard_init(&s->keyboard_hid, &s->aoa)) {
